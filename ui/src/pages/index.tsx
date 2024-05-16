@@ -1,149 +1,163 @@
+import { useEffect, useState } from "react";
+import ZkappWorkerClient from "./zkAppWorkerClient";
+import { Field, PublicKey, PrivateKey, Signature, MerkleTree } from "o1js";
+import {
+  HumanIDWitness,
+  Signatures,
+} from "../../../contracts/build/src/Airdrop.js";
+import { id1, sigs, witness } from "./zkAppWorker"
+import './reactCOIServiceWorker';
 
-import Head from 'next/head';
-import Image from 'next/image';
-import { useEffect } from 'react';
-import GradientBG from '../components/GradientBG.js';
-import styles from '../styles/Home.module.css';
-import heroMinaLogo from '../../public/assets/hero-mina-logo.svg';
-import arrowRightSmall from '../../public/assets/arrow-right-small.svg';
+let transactionFee = 0.1;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 
 export default function Home() {
+  const [state, setState] = useState({
+    zkAppWorkerClient: null as null | ZkappWorkerClient,
+    hasWallet: null as null | boolean,
+    hasBeenSetup: false,
+    accountExists: false,
+    currentTreeRoot: null as null | Field,
+    publicKey: null as null | PublicKey,
+    zkappPublicKey: null as null | PublicKey,
+    creatingTransaction: false,
+  });
+
+  const [displayText, setDisplayText] = useState("");
+  const [transactionlink, setTransactionLink] = useState("");
+
   useEffect(() => {
     (async () => {
-      const { Mina, PublicKey } = await import('o1js');
-      const { Add } = await import('../../../contracts/build/src/');
+      const { Airdrop } = await import(
+        "../../../contracts/build/src/Airdrop.js"
+      );
+      const { PublicKey, Field } = await import("o1js");
 
-      // Update this to use the address (public key) for your zkApp account.
-      // To try it out, you can try this address for an example "Add" smart contract that we've deployed to
-      // Testnet B62qkwohsqTBPsvhYE8cPZSpzJMgoKn4i1LQRuBAtVXWpaT4dgH6WoA.
-      const zkAppAddress = '';
-      // This should be removed once the zkAppAddress is updated.
-      if (!zkAppAddress) {
-        console.error(
-          'The following error is caused because the zkAppAddress has an empty string as the public key. Update the zkAppAddress with the public key for your zkApp account, or try this address for an example "Add" smart contract that we deployed to Testnet: B62qkwohsqTBPsvhYE8cPZSpzJMgoKn4i1LQRuBAtVXWpaT4dgH6WoA'
-        );
+      console.log("Loading Web Worker...");
+      const zkAppWorkerClient = new ZkappWorkerClient();
+      await sleep(5000);
+      console.log("Web Worker loaded.");
+      await zkAppWorkerClient.setActiveInstanceToDevnet();
+
+      const mina = (window as any).mina;
+
+      if (mina == null) {
+        setState({ ...state, hasWallet: false });
+        return;
       }
-      //const zkApp = new Add(PublicKey.fromBase58(zkAppAddress))
+
+      const publicKeyBase58: string = (await mina.requestAccounts())[0];
+      const publicKey = PublicKey.fromBase58(publicKeyBase58);
+
+      console.log(`Using key:${publicKey.toBase58()}`);
+
+      console.log("Checking if fee payer account exists...");
+
+      const res = await zkAppWorkerClient.fetchAccount({
+        publicKey: publicKey!,
+      });
+      const accountExists = res.error == null;
+
+      console.log("Loading contract...");
+      await zkAppWorkerClient.loadContract();
+      console.log("Contract loaded.");
+
+      console.log("Compiling contract...");
+      await zkAppWorkerClient.compileContract();
+      console.log("Contract compiled.");
+
+      const zkAppAddress = "B62qrzBYPHRZ6FsQpZCw5FbgvRbFh2jFHY2DT35pWjJc9K5Mbq2zppH";
+
+      console.log("Initializing zkApp instance...");
+      await zkAppWorkerClient.initZkappInstance(
+        PublicKey.fromBase58(zkAppAddress)
+      );
+      console.log("zkApp instance initialized.");
+
+      console.log("Fetching account...");
+      await zkAppWorkerClient.fetchAccount({
+        publicKey: PublicKey.fromBase58(zkAppAddress),
+      });
+      console.log("Account fetched.");
+
+      console.log("Fetching tree root...");
+      const treeRoot = await zkAppWorkerClient.getTreeRoot();
+      console.log("Tree root fetched.");
+      console.log("Tree root: ", treeRoot);
+
+      setState({
+        ...state,
+        zkAppWorkerClient,
+        hasWallet: true,
+        hasBeenSetup: true,
+        publicKey,
+        zkappPublicKey: PublicKey.fromBase58(zkAppAddress),
+        accountExists,
+        currentTreeRoot: treeRoot,
+      });
     })();
   }, []);
 
+  useEffect(() => {
+    (async () => {
+      if (state.hasBeenSetup && !state.accountExists) {
+        for (;;) {
+          setDisplayText("Checking if fee payer account exists...");
+          console.log("Checking if fee payer account exists...");
+          const res = await state.zkAppWorkerClient!.fetchAccount({
+            publicKey: state.publicKey!,
+          });
+          const accountExists = res.error == null;
+          if (accountExists) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+        }
+        setState({ ...state, accountExists: true });
+      }
+    })();
+  }, [state.hasBeenSetup]);
+
+  const onSendTransaction = async () => {
+    setState({ ...state, creatingTransaction: true });
+
+    setDisplayText("Creating a transaction...");
+    console.log("Creating a transaction...");
+
+    await state.zkAppWorkerClient!.fetchAccount({
+      publicKey: state.publicKey!,
+    });
+
+    await state.zkAppWorkerClient!.createClaimTransaction(state.publicKey!);
+
+    setDisplayText("Creating proof...");
+    console.log("Creating proof...");
+    await state.zkAppWorkerClient!.proveUpdateTransaction();
+
+    console.log("Requesting send transaction...");
+    setDisplayText("Requesting send transaction...");
+    const transactionJSON = await state.zkAppWorkerClient!.getTransactionJSON();
+
+    setDisplayText("Getting transaction JSON...");
+    console.log("Getting transaction JSON...");
+    const { hash } = await (window as any).mina.sendTransaction({
+      transaction: transactionJSON,
+    });
+
+    const transactionLink = `https://minascan.io/devnet/tx/${hash}`;
+    console.log(`View transaction at ${transactionLink}`);
+
+    setTransactionLink(transactionLink);
+    setDisplayText(transactionLink);
+
+    setState({ ...state, creatingTransaction: false });
+  };
+
   return (
     <>
-      <Head>
-        <title>Mina zkApp UI</title>
-        <meta name="description" content="built with o1js" />
-        <link rel="icon" href="/assets/favicon.ico" />
-      </Head>
-      <GradientBG>
-        <main className={styles.main}>
-          <div className={styles.center}>
-            <a
-              href="https://minaprotocol.com/"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <Image
-                className={styles.logo}
-                src={heroMinaLogo}
-                alt="Mina Logo"
-                width="191"
-                height="174"
-                priority
-              />
-            </a>
-            <p className={styles.tagline}>
-              built with
-              <code className={styles.code}> o1js</code>
-            </p>
-          </div>
-          <p className={styles.start}>
-            Get started by editing
-            <code className={styles.code}> src/pages/index.js</code> or <code className={styles.code}> src/pages/index.tsx</code>
-          </p>
-          <div className={styles.grid}>
-            <a
-              href="https://docs.minaprotocol.com/zkapps"
-              className={styles.card}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <h2>
-                <span>DOCS</span>
-                <div>
-                  <Image
-                    src={arrowRightSmall}
-                    alt="Mina Logo"
-                    width={16}
-                    height={16}
-                    priority
-                  />
-                </div>
-              </h2>
-              <p>Explore zkApps, how to build one, and in-depth references</p>
-            </a>
-            <a
-              href="https://docs.minaprotocol.com/zkapps/tutorials/hello-world"
-              className={styles.card}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <h2>
-                <span>TUTORIALS</span>
-                <div>
-                  <Image
-                    src={arrowRightSmall}
-                    alt="Mina Logo"
-                    width={16}
-                    height={16}
-                    priority
-                  />
-                </div>
-              </h2>
-              <p>Learn with step-by-step o1js tutorials</p>
-            </a>
-            <a
-              href="https://discord.gg/minaprotocol"
-              className={styles.card}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <h2>
-                <span>QUESTIONS</span>
-                <div>
-                  <Image
-                    src={arrowRightSmall}
-                    alt="Mina Logo"
-                    width={16}
-                    height={16}
-                    priority
-                  />
-                </div>
-              </h2>
-              <p>Ask questions on our Discord server</p>
-            </a>
-            <a
-              href="https://docs.minaprotocol.com/zkapps/how-to-deploy-a-zkapp"
-              className={styles.card}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <h2>
-                <span>DEPLOY</span>
-                <div>
-                  <Image
-                    src={arrowRightSmall}
-                    alt="Mina Logo"
-                    width={16}
-                    height={16}
-                    priority
-                  />
-                </div>
-              </h2>
-              <p>Deploy a zkApp to Testnet</p>
-            </a>
-          </div>
-        </main>
-      </GradientBG>
+      <main>{displayText}</main>
+      <button onClick={async () => await onSendTransaction()}>Send</button>
     </>
   );
 }
